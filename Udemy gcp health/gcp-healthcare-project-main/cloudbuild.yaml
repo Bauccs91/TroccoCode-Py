@@ -18,5 +18,5 @@ options:
 
 substitutions:
   _DAGS_DIRECTORY: "Udemy gcp health/gcp-healthcare-project-main/workflows"
-  _DAGS_BUCKET: "dataproc-staging-us-east1-409225416097-vuyy8jf5" # Replace with your Composer bucket
+  _DAGS_BUCKET: "dataproc-staging-us-east1-409225416097-vuyy8jf5" # Replace with your Composer buckets
   _DATA_DIRECTORY: "Udemy gcp health/gcp-healthcare-project-main/data"
