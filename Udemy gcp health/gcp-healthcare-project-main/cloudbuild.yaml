@@ -17,6 +17,6 @@ options:
   logging: CLOUD_LOGGING_ONLY
 
 substitutions:
-  _DAGS_DIRECTORY: "workflows/"
+  _DAGS_DIRECTORY: "Udemy gcp health/gcp-healthcare-project-main/workflows"
   _DAGS_BUCKET: "us-central1-composr-etl-lt-023bc183-bucket" # Replace with your Composer bucket
   _DATA_DIRECTORY: "data/"
