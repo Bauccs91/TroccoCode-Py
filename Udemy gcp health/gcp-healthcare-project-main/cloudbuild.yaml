@@ -1,0 +1,22 @@
+steps:
+  # Step 1: Install Python dependencies
+  - name: 'python'
+    entrypoint: pip
+    args: ["install", "-r", "Udemy gcp health/gcp-healthcare-project-main/utils/requirements.txt", "--user"]
+
+  # Step 2: Run the script to upload DAGs and Data to Composer bucket
+  - name: 'python'
+    entrypoint: python
+    args:
+      - "Udemy gcp health/gcp-healthcare-project-main/utils/add_dags_to_composer.py"
+      - "--dags_directory=${_DAGS_DIRECTORY}"
+      - "--dags_bucket=${_DAGS_BUCKET}"
+      - "--data_directory=${_DATA_DIRECTORY}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _DAGS_DIRECTORY: "Udemy gcp health/gcp-healthcare-project-main/workflows"
+  _DAGS_BUCKET: "us-central1-composr-etl-lt-023bc183-bucket" # Replace with your Composer bucket
+  _DATA_DIRECTORY: "Udemy gcp health/gcp-healthcare-project-main/data"
