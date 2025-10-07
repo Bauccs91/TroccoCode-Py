@@ -1,0 +1,683 @@
+Notes for Sales ETL pipeline:
+
+---------------------------------
+
+
+
+Please refer to this for all the commands used in Sales ETL pipeline
+
+
+
+
+
+1. Bring up stack components:
+
+ubuntu
+
+
+
+HDFS
+
+docker exec -it hdfs-namenode bash
+
+
+
+
+
+Jupyter:
+
+docker exec -it jupyter-notebook pyspark
+
+
+
+
+
+
+
+Spark master:
+
+docker exec -it spark-master bash
+
+
+
+
+
+bash shell script and cron
+
+ubuntu
+
+
+
+
+
+
+
+spark-apps/
+
+├── input/
+
+│   ├── sales.csv
+
+│   └── products.json
+
+├── scripts/
+
+│   └── sales_etl_job.py
+
+├── cron/
+
+│   └── run_daily_etl.sh
+
+
+
+
+
+
+
+
+
+
+
+===========================================
+
+
+
+--2 prepare hdfs inputs and do coding
+
+
+
+Prepare HDFS Input Files
+
+
+
+Ensure you’ve copied these files from your host (`./spark-apps/input/`) to HDFS.
+
+
+
+
+
+Input files:
+
+sales.csv:
+
+sale_id,product_id,quantity,date
+
+S001,P1001,2,2025-05-01
+
+S002,P1002,1,2025-05-01
+
+S003,P1003,,2025-05-01
+
+S004,P1004,3,2025-05-02
+
+
+
+
+
+
+
+products.json:
+
+
+
+[
+
+  {"product_id": "P1001", "category": "Books", "unit_price": 200},
+
+  {"product_id": "P1002", "category": "Electronics", "unit_price": 1200},
+
+  {"product_id": "P1004", "category": "Stationery", "unit_price": 50}
+
+]
+
+
+
+
+
+a. HDFS Upload (run inside `hdfs-namenode` container):
+
+
+
+docker exec -it hdfs-namenode bash
+
+
+
+hdfs dfs -mkdir -p /sales_etl/input
+
+hdfs dfs -put /opt/spark-apps/input/sales_etl/sales.csv /sales_etl/input/
+
+hdfs dfs -put /opt/spark-apps/input/sales_etl/products.json /sales_etl/input/
+
+
+
+hdfs dfs -mkdir -p /sales_etl/output
+
+hadoop fs -chmod  -R 777 /sales_etl
+
+
+
+
+
+b. Open PySpark Shell
+
+
+
+docker exec -it jupyter-notebook pyspark
+
+
+
+
+
+
+
+## Read Data from HDFS Using `spark.read`
+
+df_sales = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/sales_etl/input/sales.csv")
+
+df_products = spark.read.json("hdfs://hdfs-namenode:9000/sales_etl/input/products.json")
+
+
+
+df_sales.createOrReplaceTempView("sales_raw")
+
+df_products.createOrReplaceTempView("products_raw")
+
+
+
+## Clean & Transform via Spark SQL
+
+
+
+spark.sql("""
+
+    CREATE OR REPLACE TEMP VIEW sales_clean AS
+
+    SELECT
+
+        sale_id,
+
+        product_id,
+
+        CAST(quantity AS INT) AS quantity,
+
+        date
+
+    FROM sales_raw
+
+    WHERE quantity IS NOT NULL
+
+""")
+
+
+
+## Join + Enrich with Classification Logic
+
+
+
+spark.sql("""
+
+    CREATE OR REPLACE TEMP VIEW sales_enriched AS
+
+    SELECT
+
+        s.sale_id,
+
+        s.product_id,
+
+        s.quantity,
+
+        p.unit_price,
+
+        s.quantity * p.unit_price AS total_price,
+
+        CASE
+
+            WHEN s.quantity * p.unit_price >= 1000 THEN 'High'
+
+            WHEN s.quantity * p.unit_price >= 300 THEN 'Medium'
+
+            ELSE 'Low'
+
+        END AS sale_value_category
+
+    FROM sales_clean s
+
+    JOIN products_raw p
+
+    ON s.product_id = p.product_id
+
+""")
+
+
+
+
+
+##  Write Output to HDFS Using `write`
+
+
+
+
+
+df_output = spark.sql("""
+
+    SELECT sale_id, product_id, quantity, total_price, sale_value_category
+
+    FROM sales_enriched
+
+""")
+
+
+
+df_output.write.mode("overwrite").option("header", True).csv("hdfs://hdfs-namenode:9000/sales_etl/output/final_csv")
+
+df_output.write.mode("overwrite").parquet("hdfs://hdfs-namenode:9000/sales_etl/output/final_parquet")
+
+
+
+
+
+
+
+
+
+
+
+=========================================================================
+
+
+
+-- 3 packaging:
+
+
+
+folder str
+
+./spark-apps/
+
+├── input/
+
+│   └── sales.csv, products.json
+
+├── scripts/
+
+│   └── sales_etl_job.py   --> Your new script
+
+
+
+from pyspark.sql import SparkSession
+
+
+
+def main():
+
+    spark = SparkSession.builder \
+
+        .appName("SalesETLJob") \
+
+        .master("spark://spark-master:7077") \
+
+        .getOrCreate()
+
+
+
+    # Read sales CSV and products JSON from HDFS
+
+    df_sales = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/sales_etl/input/sales.csv")
+
+    df_products = spark.read.json("hdfs://hdfs-namenode:9000/sales_etl/input/products.json")
+
+
+
+    # Register as temp views
+
+    df_sales.createOrReplaceTempView("sales_raw")
+
+    df_products.createOrReplaceTempView("products_raw")
+
+
+
+    # Clean and cast quantity
+
+    spark.sql("""
+
+        CREATE OR REPLACE TEMP VIEW sales_clean AS
+
+        SELECT
+
+            sale_id,
+
+            product_id,
+
+            CAST(quantity AS INT) AS quantity,
+
+            date
+
+        FROM sales_raw
+
+        WHERE quantity IS NOT NULL
+
+    """)
+
+
+
+    # Join and enrich
+
+    spark.sql("""
+
+        CREATE OR REPLACE TEMP VIEW sales_enriched AS
+
+        SELECT
+
+            s.sale_id,
+
+            s.product_id,
+
+            s.quantity,
+
+            p.unit_price,
+
+            s.quantity * p.unit_price AS total_price,
+
+            CASE
+
+                WHEN s.quantity * p.unit_price >= 1000 THEN 'High'
+
+                WHEN s.quantity * p.unit_price >= 300 THEN 'Medium'
+
+                ELSE 'Low'
+
+            END AS sale_value_category
+
+        FROM sales_clean s
+
+        JOIN products_raw p
+
+        ON s.product_id = p.product_id
+
+    """)
+
+
+
+    # Final output
+
+    df_output = spark.sql("""
+
+        SELECT sale_id, product_id, quantity, total_price, sale_value_category
+
+        FROM sales_enriched
+
+    """)
+
+
+
+    # Write to HDFS
+
+    df_output.write.mode("overwrite").option("header", True).csv("hdfs://hdfs-namenode:9000/sales_etl/output/final_csv")
+
+    df_output.write.mode("overwrite").parquet("hdfs://hdfs-namenode:9000/sales_etl/output/final_parquet")
+
+
+
+    spark.stop()
+
+
+
+if __name__ == "__main__":
+
+    main()
+
+
+
+
+
+docker exec -it spark-master bash
+
+
+
+spark-submit /opt/spark-apps/scripts/sales_etl_job.py
+
+
+
+
+
+
+
+
+
+import sys
+
+from pyspark.sql import SparkSession
+
+
+
+def main(run_date):
+
+    spark = SparkSession.builder \
+
+        .appName("SalesETLJob") \
+
+        .master("spark://spark-master:7077") \
+
+        .getOrCreate()
+
+
+
+    # Input file paths
+
+    df_sales = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/sales_etl/input/sales.csv")
+
+    df_products = spark.read.json("hdfs://hdfs-namenode:9000/sales_etl/input/products.json")
+
+
+
+    # Register temp views
+
+    df_sales.createOrReplaceTempView("sales_raw")
+
+    df_products.createOrReplaceTempView("products_raw")
+
+
+
+    # Clean sales data
+
+    spark.sql("""
+
+        CREATE OR REPLACE TEMP VIEW sales_clean AS
+
+        SELECT
+
+            sale_id,
+
+            product_id,
+
+            CAST(quantity AS INT) AS quantity,
+
+            date
+
+        FROM sales_raw
+
+        WHERE quantity IS NOT NULL
+
+    """)
+
+
+
+    # Join + classify
+
+    spark.sql("""
+
+        CREATE OR REPLACE TEMP VIEW sales_enriched AS
+
+        SELECT
+
+            s.sale_id,
+
+            s.product_id,
+
+            s.quantity,
+
+            p.unit_price,
+
+            s.quantity * p.unit_price AS total_price,
+
+            CASE
+
+                WHEN s.quantity * p.unit_price >= 1000 THEN 'High'
+
+                WHEN s.quantity * p.unit_price >= 300 THEN 'Medium'
+
+                ELSE 'Low'
+
+            END AS sale_value_category
+
+        FROM sales_clean s
+
+        JOIN products_raw p
+
+        ON s.product_id = p.product_id
+
+    """)
+
+
+
+    # Final output DataFrame
+
+    df_output = spark.sql("""
+
+        SELECT sale_id, product_id, quantity, total_price, sale_value_category
+
+        FROM sales_enriched
+
+    """)
+
+
+
+    # Output path with dynamic date
+
+    output_csv_path = f"hdfs://hdfs-namenode:9000/sales_etl/output/csv/{run_date}"
+
+    output_parquet_path = f"hdfs://hdfs-namenode:9000/sales_etl/output/parquet/{run_date}"
+
+
+
+    # Write output
+
+    df_output.write.mode("overwrite").option("header", True).csv(output_csv_path)
+
+    df_output.write.mode("overwrite").parquet(output_parquet_path)
+
+
+
+    print(f"Job completed for {run_date}")
+
+    spark.stop()
+
+
+
+if __name__ == "__main__":
+
+    if len(sys.argv) < 2:
+
+        print("Please provide run_date argument in format YYYY-MM-DD")
+
+        sys.exit(1)
+
+
+
+    run_date = sys.argv[1]
+
+    main(run_date)
+
+
+
+
+
+=====================================================
+
+--4 bash with dynamic args
+
+
+
+#!/bin/bash
+
+
+
+# Check for argument
+
+if [ -z "$1" ]; then
+
+  echo " Usage: ./run_sales_job.sh <YYYY-MM-DD>"
+
+  exit 1
+
+fi
+
+
+
+RUN_DATE="$1"
+
+
+
+echo "Triggering sales_etl_job.py for $RUN_DATE..."
+
+
+
+# Run spark-submit inside spark-master container
+
+docker exec spark-master spark-submit /opt/spark-apps/scripts/sales_etl.py "$RUN_DATE"
+
+
+
+echo "Job completed for $RUN_DATE"
+
+
+
+vi run_sales.sh
+
+./run_sales.sh 2025-05-01
+
+
+
+
+
+
+
+
+
+It will write to:
+
+/sales_etl/output/csv/2025-05-01
+
+/sales_etl/output/parquet/2025-05-01
+
+
+
+
+
+
+
+
+
+
+
+==============================================================
+
+--5 Schedule
+
+
+
+mkdir -p logs
+
+chmod 777 logs
+
+
+
+to run every minute(this is working for cron)
+
+* * * * * /mnt/c/pyspark_stack/spark-apps/cron/run_sales.sh '2025-01-01' >> /mnt/c/pyspark_stack/spark-apps/logs/sales_etl.log 2>&1
+
+
+
+
+
+15 19 * * * /mnt/c/pyspark_stack/spark-apps/cron/run_sales.sh '2025-01-01' >> /mnt/c/pyspark_stack/spark-apps/logs/sales_etl.log 2>&1
