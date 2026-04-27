@@ -1,0 +1,562 @@
+Notes for Customer ETL pipeline 
+
+---------------------------------
+
+Below commands are used in demo for customer etl. 
+
+Also, you can find all the files and code for this pipeline in lecture 7 resources i.e, "One Command: Launch Spark, Airflow, HDFS, Jupyter" of this course
+(under spark-apps/sales_etl folder)
+
+
+Note: This note mirrors the demo; in a few spots I tweak commands live, so minor differences may appear.
+
+
+
+spark-apps/
+└── customer_etl/
+    ├── input/                        # From business systems (local path)
+    │   ├── orders.csv
+    │   ├── products.json
+    │   └── customers.csv
+    ├── scripts/
+    │   └── customer_etl_job.py       # PySpark job logic
+    ├── shell/
+    │   └── run_customer_etl.sh       # Shell script to run full flow
+    ├── shared_output/                # Final CSV exported for business
+    │   └── 2025-05-08/
+    │       └── loyalty_snapshot.csv
+    ├── dags/
+    │   └── customer_etl_dag.py       # Airflow DAG (optional)
+    └── README.md
+
+
+
+
+******************** pre requisites ************************
+
+-- get all inputs files and make source ready
+
+/mnt/c/pyspark_stack/customer_etl/input/
+
+
+### 1. orders.csv:
+order_id,customer_id,product_id,quantity,order_date
+O001,C101,P201,1,2025-05-01
+O002,C101,P202,2,2025-05-02
+O003,C102,P201,1,2025-05-02
+O004,C101,P203,2,2025-05-03
+O005,C103,P204,1,2025-05-05
+O006,C102,P201,2,2025-05-06
+O007,C101,P202,1,2025-05-07
+O008,C104,P203,2,2025-05-07
+O009,C104,P202,1,2025-05-08
+O010,C105,P201,1,2025-05-08
+
+
+
+### 2.`products.json
+[
+  {"product_id": "P201", "category": "Books", "unit_price": 250},
+  {"product_id": "P202", "category": "Electronics", "unit_price": 1200},
+  {"product_id": "P203", "category": "Health", "unit_price": 400},
+  {"product_id": "P204", "category": "Stationery", "unit_price": 150}
+]
+
+
+### 3. customers.csv:
+customer_id,customer_name,city,state,signup_date
+C101,Olivia Thompson,Seattle,WA,2024-10-15
+C102,Ethan Johnson,Austin,TX,2025-01-05
+C103,Emma Davis,New York,NY,2025-03-20
+C104,Liam Garcia,Chicago,IL,2025-01-25
+C105,Ava Martinez,San Francisco,CA,2025-02-10
+
+
+
+
+hdfs dfs -mkdir -p /customer_etl/input/
+
+hdfs dfs -mkdir -p  /customer_etl/output
+hadoop fs -chmod  -R 777 /customer_etl/output
+
+
+hdfs dfs -put ./input/orders.csv /customer_etl/input/
+hdfs dfs -put ./input/products.json /customer_etl/input/
+hdfs dfs -put ./input/customers.csv /customer_etl/input/
+
+
+
+
+
+
+
+*****************  code using Jupyter notebook ********************************
+
+
+
+
+from pyspark.sql import SparkSession
+spark = SparkSession.builder.appName("TestNotebook").getOrCreate()
+
+df_orders = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/customer_etl/input/orders.csv")
+df_products = spark.read.json("hdfs://hdfs-namenode:9000/customer_etl/input/products.json")
+df_customers = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/customer_etl/input/customers.csv")
+
+
+Register temp views:
+
+
+df_orders.createOrReplaceTempView("orders")
+df_products.createOrReplaceTempView("products")
+df_customers.createOrReplaceTempView("customers")
+
+
+## Step 2: Enrich + Aggregate + Classify (Using SQL)
+
+# Enrich with price
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW enriched_orders AS
+    SELECT
+        o.order_id,
+        o.customer_id,
+        o.product_id,
+        o.quantity,
+        o.order_date,
+        p.category,
+        p.unit_price,
+        o.quantity * p.unit_price AS total_price
+    FROM orders o
+    JOIN products p ON o.product_id = p.product_id
+""")
+
+# Aggregate per customer
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW customer_metrics AS
+    SELECT
+        customer_id,
+        COUNT(order_id) AS total_orders,
+        SUM(total_price) AS total_spent,
+        COUNT(DISTINCT order_date) AS days_active,
+        COUNT(DISTINCT category) AS categories_bought
+    FROM enriched_orders
+    GROUP BY customer_id
+""")
+
+# Add loyalty label
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW customer_loyalty AS
+    SELECT
+        m.customer_id,
+        c.customer_name,
+        c.city,
+        c.state,
+        c.signup_date,
+        m.total_orders,
+        m.total_spent,
+        m.days_active,
+        m.categories_bought,
+        CASE
+            WHEN m.total_orders >= 3 AND m.days_active >= 2 AND m.categories_bought >= 2 THEN 'Loyal'
+            WHEN m.total_orders >= 2 AND (m.days_active >= 2 OR m.categories_bought >= 2) THEN 'Engaged'
+            ELSE 'Casual'
+        END AS loyalty_status
+    FROM customer_metrics m
+    JOIN customers c ON m.customer_id = c.customer_id
+""")
+
+
+## Step 3: Write Final Output to HDFS (Parquet only)
+
+df_loyalty = spark.sql("SELECT * FROM customer_loyalty")
+
+df_loyalty.write.mode("overwrite").option("header", True).csv("hdfs://hdfs-namenode:9000/customer_etl/output/loyalty_snapshot")
+
+
+
+
+
+
+
+************* prepare script and execute using spark-submit *******************
+
+
+
+---  prepare script and execute using spark-submit
+
+jupyter nbconvert --to script customer_etl_job.ipynb
+
+
+
+
+spark-apps/customer_etl/scripts/customer_etl_job.py
+
+---
+
+##  Full Script: `customer_etl_job.py`
+
+from pyspark.sql import SparkSession
+import sys
+
+def main(run_date):
+    spark = SparkSession.builder \
+        .appName("CustomerLoyaltyETL") \
+        .master("spark://spark-master:7077") \
+        .getOrCreate()
+
+    # Read input files from HDFS
+    df_orders = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/customer_etl/input/orders.csv")
+    df_products = spark.read.json("hdfs://hdfs-namenode:9000/customer_etl/input/products.json")
+    df_customers = spark.read.option("header", True).csv("hdfs://hdfs-namenode:9000/customer_etl/input/customers.csv")
+
+    df_orders.createOrReplaceTempView("orders")
+    df_products.createOrReplaceTempView("products")
+    df_customers.createOrReplaceTempView("customers")
+
+    # Step 1: Enrich Orders
+    spark.sql("""
+        CREATE OR REPLACE TEMP VIEW enriched_orders AS
+        SELECT
+            o.order_id,
+            o.customer_id,
+            o.product_id,
+            o.quantity,
+            o.order_date,
+            p.category,
+            p.unit_price,
+            o.quantity * p.unit_price AS total_price
+        FROM orders o
+        JOIN products p ON o.product_id = p.product_id
+    """)
+
+    # Step 2: Aggregate
+    spark.sql("""
+        CREATE OR REPLACE TEMP VIEW customer_metrics AS
+        SELECT
+            customer_id,
+            COUNT(order_id) AS total_orders,
+            SUM(total_price) AS total_spent,
+            COUNT(DISTINCT order_date) AS days_active,
+            COUNT(DISTINCT category) AS categories_bought
+        FROM enriched_orders
+        GROUP BY customer_id
+    """)
+
+    # Step 3: Add Loyalty Status
+    spark.sql("""
+        CREATE OR REPLACE TEMP VIEW customer_loyalty AS
+        SELECT
+            m.customer_id,
+            c.customer_name,
+            c.city,
+            c.state,
+            c.signup_date,
+            m.total_orders,
+            m.total_spent,
+            m.days_active,
+            m.categories_bought,
+            CASE
+                WHEN m.total_orders >= 3 AND m.days_active >= 2 AND m.categories_bought >= 2 THEN 'Loyal'
+                WHEN m.total_orders >= 2 AND (m.days_active >= 2 OR m.categories_bought >= 2) THEN 'Engaged'
+                ELSE 'Casual'
+            END AS loyalty_status
+        FROM customer_metrics m
+        JOIN customers c ON m.customer_id = c.customer_id
+    """)
+
+    # Step 4: Write to HDFS (Parquet only)
+    df_loyalty = spark.sql("SELECT * FROM customer_loyalty")
+
+    output_path = f"hdfs://hdfs-namenode:9000/customer_etl/output/loyalty_snapshot_{run_date}.parquet"
+    df_loyalty.write.mode("overwrite").parquet(output_path)
+
+    print(f"✅ Parquet written to HDFS: {output_path}")
+    spark.stop()
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("❌ Usage: customer_etl_job.py <YYYY-MM-DD>")
+        sys.exit(1)
+    main(sys.argv[1])
+
+
+
+##  How to Run Manually
+
+docker exec spark-master spark-submit /opt/spark-apps/customer_etl/scripts/customer_etl_job.py 2025-05-08
+
+
+
+
+
+
+**************************** shell script *************************************************
+
+
+
+##  Full Script: `run_customer_etl.sh`
+
+
+a. spark-apps/customer_etl/shell/run_customer_etl.sh
+
+
+#!/bin/bash
+
+#  Step 1: Validate Input
+if [ -z "$1" ]; then
+  echo " Usage: ./run_customer_etl.sh <YYYY-MM-DD>"
+  exit 1
+fi
+
+RUN_DATE="$1"
+LANDING_PATH="/opt/spark-apps/landing/customer_etl/"
+HDFS_INPUT="/customer_etl/input"
+HDFS_OUTPUT="/customer_etl/output/loyalty_snapshot_${RUN_DATE}"
+FINAL_CSV="/opt/spark-apps/shared_output/customer_etl/${RUN_DATE}/loyalty_snapshot.csv"
+
+echo " Starting Customer ETL for $RUN_DATE..."
+
+#  Step 2: Upload files to HDFS
+echo " Uploading input files to HDFS..."
+docker exec hdfs-namenode hdfs dfs -rm -r -f ${HDFS_INPUT}
+docker exec hdfs-namenode hdfs dfs -mkdir -p ${HDFS_INPUT}
+docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/customers.csv" ${HDFS_INPUT}/
+docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/products.json" ${HDFS_INPUT}/
+docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/orders.csv" ${HDFS_INPUT}/
+
+# Step 3: Run Spark Job
+echo " Running Spark job..."
+docker exec spark-master spark-submit /opt/spark-apps/customer_etl/scripts/customer_etl_job.py "$RUN_DATE"
+
+# Step 4: Export to CSV (getmerge)
+echo " Exporting CSV from HDFS..."
+
+  mkdir -p "/opt/spark-apps/shared_output/customer_etl/${RUN_DATE}"
+  docker exec hdfs-namenode hdfs dfs -getmerge ${HDFS_OUTPUT}/part-* "/opt/spark-apps/shared_output/customer_etl/${RUN_DATE}/loyalty_snapshot.csv"
+
+echo " Done. Final CSV ready at:"
+echo "$FINAL_CSV"
+
+
+
+
+b. changes in pyspark script:
+df_final.write.mode("overwrite") \
+    .option("header", True) \
+    .csv(f"/customer_etl/output/loyalty_snapshot_{run_date}.csv")
+
+
+
+
+--- execute 
+
+chmod +x spark-apps/customer_etl/cron/run_customer_etl.sh
+
+
+bash spark-apps/customer_etl/cron/run_customer_etl.sh 2025-05-08
+
+
+
+
+**************************** Automate with airflow dag *****************
+
+
+a. changed to shell to make it work from airflow:
+
+#!/bin/bash
+
+# Step 1: Validate Input
+if [ -z "$1" ]; then
+  echo "Usage: ./run_customer_etl.sh <YYYY-MM-DD>"
+  exit 1
+fi
+
+RUN_DATE="$1"
+LANDING_PATH="/opt/spark-apps/landing/customer_etl/"
+HDFS_INPUT="/customer_etl/input"
+HDFS_OUTPUT="/customer_etl/output/loyalty_snapshot_${RUN_DATE}.csv"
+FINAL_CSV="/opt/spark-apps/shared_output/customer_etl/loyalty_snapshot_${RUN_DATE}.csv"
+
+echo " Running Customer ETL for: $RUN_DATE"
+echo " Final CSV will be stored at: $FINAL_CSV"
+
+# Step 2: Detect if running inside container
+if grep -qE 'docker|containerd' /proc/1/cgroup; then
+  echo " Detected: Running INSIDE container (Airflow or Jupyter)"
+
+  export PATH=$PATH:/opt/hadoop/bin
+
+  echo " Uploading to HDFS..."
+  hdfs dfs -rm -r -f ${HDFS_INPUT}
+  hdfs dfs -mkdir -p ${HDFS_INPUT}
+  
+  hdfs dfs -put "${LANDING_PATH}/customers.csv" ${HDFS_INPUT}/
+  hdfs dfs -put "${LANDING_PATH}/products.json" ${HDFS_INPUT}/
+  hdfs dfs -put "${LANDING_PATH}/orders.csv" ${HDFS_INPUT}/
+
+  echo "  Running Spark job..."
+  spark-submit --master spark://spark-master:7077 /opt/spark-apps/customer_etl/scripts/customer_etl_job.py "$RUN_DATE"
+
+  echo " Exporting merged CSV to local path..."
+  #mkdir -p "/opt/spark-apps/shared_output/customer_etl/${RUN_DATE}"
+  hdfs dfs -getmerge ${HDFS_OUTPUT}/part-* "$FINAL_CSV"
+
+else
+  echo " Detected: Running OUTSIDE container (Ubuntu host)"
+
+  echo " Uploading to HDFS via docker exec..."
+  docker exec hdfs-namenode hdfs dfs -rm -r -f ${HDFS_INPUT}
+  docker exec hdfs-namenode hdfs dfs -mkdir -p ${HDFS_INPUT}
+  #docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/*" ${HDFS_INPUT}/
+  docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/customers.csv" ${HDFS_INPUT}/
+  docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/products.json" ${HDFS_INPUT}/
+  docker exec hdfs-namenode hdfs dfs -put "${LANDING_PATH}/orders.csv" ${HDFS_INPUT}/
+
+
+  echo " Submitting Spark job via docker exec..."
+  docker exec spark-master spark-submit /opt/spark-apps/customer_etl/scripts/customer_etl_job.py "$RUN_DATE"
+
+  echo "Merging HDFS output to host shared folder..."
+  #mkdir -p "/opt/spark-apps/shared_output/customer_etl/"
+  docker exec hdfs-namenode hdfs dfs -getmerge ${HDFS_OUTPUT}/part-* "$FINAL_CSV"
+fi
+
+echo " Done. Output available at: $FINAL_CSV"
+
+
+
+
+
+b. work on dag
+
+spark-apps/customer_etl/dags/customer_etl_dag.py
+
+
+Copy this file to your **Airflow dags folder**, e.g.:
+cp spark-apps/customer_etl/dags/customer_etl_dag.py ~/airflow/dags/
+
+
+
+hdfs dfs -chmod -R 777 /customer_etl
+
+
+check if hdfs accessible from airflow
+
+docker exec -it airflow-webserver bash
+hdfs dfs -ls /
+
+## Full DAG Code: `customer_etl_dag.py`
+
+
+from airflow import DAG
+from airflow.operators.bash import BashOperator
+from datetime import datetime, timedelta
+
+default_args = {
+    'owner': 'customer_etl_pipeline',
+    'retries': 1,
+    'retry_delay': timedelta(minutes=2)
+}
+
+with DAG(
+    dag_id='customer_etl_dag',
+    default_args=default_args,
+    start_date=datetime(2025, 5, 8),
+    schedule_interval='@daily',
+    catchup=False
+) as dag:
+
+    run_etl = BashOperator(
+        task_id='run_customer_loyalty_etl',
+        bash_command='bash /opt/spark-apps/customer_etl/shell/customer_etl_job.sh {{ ds }}'
+    )
+
+    run_etl
+
+## How to Invoke This DAG
+
+### 1. Make sure the DAG file is copied to Airflow
+
+cp spark-apps/customer_etl/dags/customer_etl_dag.py ~/airflow/dags/
+
+
+
+
+
+
+****************** clean up and checkin **************************
+
+
+
+Final Folder Structure (Post-Build)
+
+spark-apps/
+└── customer_etl/
+    ├── input/                            # Raw local input (landing)
+    │   ├── orders.csv
+    │   ├── products.json
+    │   └── customers.csv
+    ├── scripts/
+    │   └── customer_etl_job.py           # Spark script
+    ├── shell/
+    │   └── run_customer_etl.sh           # Wrapper to run full flow
+    ├── dags/
+    │   └── customer_etl_dag.py           # Airflow DAG
+    ├── README.md                         # Pipeline summary
+    └── .gitignore
+
+## Step 2: `.gitignore` (Optional but Recommended)
+
+Inside `customer_etl/`:
+echo "__pycache__/" >> .gitignore
+echo "*.pyc" >> .gitignore
+echo "logs/" >> .gitignore
+echo "shared_output/" >> .gitignore
+
+
+## Step 3: `README.md` Template
+
+Inside `customer_etl/README.md`:
+
+# Customer Loyalty ETL Pipeline
+
+This pipeline processes daily customer orders to compute loyalty classification.
+
+## Folder Structure
+
+- `input/` – Raw files dropped daily (orders, products, customers)
+- `scripts/` – Spark job using PySpark and Spark SQL
+- `cron/` – Shell script to upload to HDFS, run job, export CSV
+- `shared_output/` – Final file exported for business
+- `dags/` – Airflow DAG to schedule entire flow
+
+##  How to Run
+
+bash cron/run_customer_etl.sh 2025-05-08
+
+Or trigger via Airflow using `customer_etl_dag`.
+
+##  Output Location
+
+CSV file will be available at:
+
+/mnt/c/pyspark_stack/shared_output/customer_etl/<run_date>/loyalty_snapshot.csv
+
+
+
+## Step 4: Git Init & Commit
+cd spark-apps/customer_etl
+git init
+git add .
+git commit -m "Customer ETL pipeline complete – Spark + HDFS + Airflow + CSV export"
+
+
+
+
+## (Optional) Push to GitHub
+
+git remote add origin https://github.com/your-username/customer-etl-pipeline.git
+git push -u origin main
+
+
+
+

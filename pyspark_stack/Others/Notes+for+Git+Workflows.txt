@@ -1,0 +1,89 @@
+Notes for Git Workflow:
+---------------------------------
+
+Below are notes used for demo of git workflow. please use it as a reference.
+
+
+Note: This note mirrors the demo; in a few spots I tweak commands live, so minor differences may appear.
+
+
+
+-- git branching
+We’ll create 2 feature branches:
+
+1. `feature/label_change_pyspark`
+2. `feature/env_update_path`
+
+ 2 features will be merged into a common release branch:
+ `release/customer-v1.1`
+
+---
+
+## Step-by-Step Git Workflow
+
+### Start from `master`
+
+git switch master
+--git pull origin master
+
+
+
+### Feature 1: Label change 'Loyal' to 'Premium'
+
+git switch -c feature/label_change_pyspark
+ 
+-- to check diff  
+git diff customer_etl_job.py
+ 
+git add . 
+git commit -m "changed from loyal to Premium"
+
+# Optional: Push to remote(Git hub) if needed 
+--git push origin feature/label_change_pyspark
+
+
+
+###  Feature 2: Changes in env.sh
+
+git switch master
+git switch -c feature/env_update
+
+git status
+git diff env.sh
+
+git add .
+git commit -m "updated env path"
+
+--git push origin feature/env_update
+
+
+
+### Create the Release Branch
+git switch master
+git switch -c release/customer-v1.1
+
+At this point it’s still empty — so now let’s bring in 2 features.
+
+## Step: Merge Features into Release
+
+# From inside release/customer-v1.1
+
+git merge feature/label_change_pyspark
+git merge feature/env_update_path
+
+
+If there are no conflicts, you now have one branch with all 3 features combined.
+
+
+### Tag the Release
+
+git tag v1.1
+--git push origin release/customer-v1.1
+--git push origin v1.1
+
+
+
+### Final Step: Merge Release into Main
+
+git switch master
+git merge release/customer-v1.1
